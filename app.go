@@ -131,6 +131,14 @@ func (app *App) Run(ctx context.Context) error {
 		return c.Reply("Task completed successfully")
 	})
 
+	app.bot.Handle("/help", func(c telebot.Context) error {
+		return c.Reply(
+			"/tasks - list all tasks\n" +
+				"/run <task_id> - run specific task\n" +
+				"/queue - show current task queue",
+		)
+	})
+
 	go app.bot.Start()
 
 	for {
