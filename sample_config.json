@@ -1,0 +1,29 @@
+{
+    "token": "TELEGRAM_TOKEN_HERE",
+    "chat_id": -123123123,
+    "default_retry": {
+        "count": 1,
+        "delay_sec": 5
+    },
+    "max_active_tasks": 3,
+    "default_timeout_sec": 60,
+    "tasks": [
+        {
+            "id": "do_something",
+            "when": "every day",
+            "url": "http://localhost:8080/do_something",
+            "body": "{\"some\": \"arguments\"}",
+            "retry": {
+                "count": 3,
+                "delay_sec": 1
+            }
+        },
+        {
+            "id": "hit_cache",
+            "when": "every hour",
+            "method": "GET",
+            "url": "http://localhost:8080/important/object",
+            "timeout_sec": 30
+        }
+    ]
+}
