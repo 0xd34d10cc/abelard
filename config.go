@@ -1,10 +1,11 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
+
+	"github.com/goccy/go-yaml"
 )
 
 type TaskPeriod = string
@@ -18,31 +19,31 @@ const (
 
 type Config struct {
 	// Telegram config
-	Token  string `json:"token"`
-	ChatID int64  `json:"chat_id"`
+	Token  string `yaml:"token"`
+	ChatID int64  `yaml:"chat_id"`
 
 	// Tasks config
-	Tasks              []Task `json:"tasks"`
-	DefaultRetry       Retry  `json:"default_retry"`
-	DefaultTaskTimeout int64  `json:"default_timeout_sec"`
-	MaxActiveTasks     int64  `json:"max_active_tasks"`
+	Tasks              []Task `yaml:"tasks"`
+	DefaultRetry       Retry  `yaml:"default_retry"`
+	DefaultTaskTimeout int64  `yaml:"default_timeout_sec"`
+	MaxActiveTasks     int64  `yaml:"max_active_tasks"`
 }
 
 type Task struct {
-	ID             string `json:"id"`
-	When           string `json:"when"`
-	Method         string `json:"method"` // POST by default
-	URL            string `json:"url"`
-	Body           string `json:"body"` // Empty by default
-	Retry          *Retry `json:"retry"`
-	TimeoutSeconds int64  `json:"timeout_sec"`
+	ID             string `yaml:"id"`
+	When           string `yaml:"when"`
+	Method         string `yaml:"method"` // POST by default
+	URL            string `yaml:"url"`
+	Body           string `yaml:"body"` // Empty by default
+	Retry          *Retry `yaml:"retry"`
+	TimeoutSeconds int64  `yaml:"timeout_sec"`
 }
 
 type Retry struct {
 	// How many times to retry
-	Count int64 `json:"count"`
+	Count int64 `yaml:"count"`
 	// Delay between retries
-	DelaySeconds int64 `json:"delay_sec"`
+	DelaySeconds int64 `yaml:"delay_sec"`
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -52,9 +53,9 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	var config Config
-	err = json.Unmarshal(content, &config)
+	err = yaml.Unmarshal(content, &config)
 	if err != nil {
-		return nil, fmt.Errorf("json.Unmarshal: %w", err)
+		return nil, fmt.Errorf("yaml.Unmarshal: %w", err)
 	}
 
 	if config.MaxActiveTasks == 0 {
