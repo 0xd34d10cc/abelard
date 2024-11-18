@@ -10,9 +10,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/samber/lo"
 	"go.uber.org/zap"
 	"gopkg.in/telebot.v3"
+
+	"github.com/go-co-op/gocron/v2"
+	"github.com/samber/lo"
 )
 
 type App struct {
@@ -22,9 +24,9 @@ type App struct {
 	bot    *telebot.Bot
 	chat   *telebot.Chat
 
-	tasksByID      map[string]*Task
-	taskQueue      *TaskQueue
-	taskTickets    chan struct{}
+	scheduler gocron.Scheduler
+	jobByName map[string]*Job
+
 	defaultTimeout time.Duration
 	defaultRetry   Retry
 }
@@ -49,35 +51,44 @@ func NewApp(config *Config, logger *zap.Logger) (*App, error) {
 		zap.String("name", chat.Title),
 	)
 
-	tasksByID := map[string]*Task{}
-	for _, task := range config.Tasks {
-		if _, ok := tasksByID[task.ID]; ok {
-			return nil, fmt.Errorf("duplicate task id %v", task.ID)
-		}
-
-		tasksByID[task.ID] = lo.ToPtr(task)
-	}
-
-	queue, err := NewTaskQueue(config.Tasks)
+	scheduler, err := gocron.NewScheduler()
 	if err != nil {
-		return nil, fmt.Errorf("NewTaskQueue: %w", err)
+		return nil, fmt.Errorf("gocron.NewScheduler: %w", err)
 	}
 
-	tickets := make(chan struct{}, config.MaxActiveTasks)
-	return &App{
+	app := &App{
 		finished: make(chan struct{}),
 
 		logger: logger,
 		bot:    bot,
 		chat:   chat,
 
-		tasksByID:   tasksByID,
-		taskQueue:   queue,
-		taskTickets: tickets,
+		scheduler: scheduler,
 
-		defaultTimeout: time.Duration(config.DefaultTaskTimeout) * time.Second,
+		defaultTimeout: time.Duration(config.DefaultJobTimeout) * time.Second,
 		defaultRetry:   config.DefaultRetry,
-	}, nil
+	}
+
+	jobByName := map[string]*Job{}
+	for _, job := range config.Jobs {
+		job := lo.ToPtr(job)
+		if _, ok := jobByName[job.Name]; ok {
+			return nil, fmt.Errorf("duplicate job with name: %v", job.Name)
+		}
+
+		jobByName[job.Name] = job
+		_, err := scheduler.NewJob(
+			app.Definition(job),
+			app.Task(job),
+			gocron.WithName(job.Name),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("job %v error: %w", job.Name, err)
+		}
+	}
+
+	app.jobByName = jobByName
+	return app, nil
 }
 
 func (app *App) Run(ctx context.Context) error {
@@ -92,24 +103,35 @@ func (app *App) Run(ctx context.Context) error {
 	})
 
 	app.bot.Handle("/queue", func(c telebot.Context) error {
-		tasks := app.taskQueue.List()
-		sort.Slice(tasks, func(i, j int) bool {
-			return tasks[i].At.Before(tasks[j].At)
+		jobs := app.scheduler.Jobs()
+		sort.Slice(jobs, func(i, j int) bool {
+			left, _ := jobs[i].NextRun()
+			right, _ := jobs[j].NextRun()
+			return left.Before(right)
 		})
 
+		if len(jobs) == 0 {
+			return c.Reply("Job queue is empty")
+		}
+
 		message := strings.Builder{}
-		for _, task := range tasks {
-			message.WriteString(task.String())
+		for _, job := range jobs {
+			t, _ := job.NextRun()
+			message.WriteString(t.Format(time.RFC3339))
+			message.WriteString(" - ")
+			message.WriteString(job.Name())
 			message.WriteByte('\n')
 		}
 
 		return c.Reply(message.String())
 	})
 
-	app.bot.Handle("/tasks", func(c telebot.Context) error {
+	app.bot.Handle("/jobs", func(c telebot.Context) error {
 		message := strings.Builder{}
-		for _, task := range app.tasksByID {
-			message.WriteString(fmt.Sprintf("%v (%v)", task.ID, task.When))
+		for name, job := range app.jobByName {
+			message.WriteString(name)
+			message.WriteString(" - ")
+			message.WriteString(job.Schedule)
 			message.WriteByte('\n')
 		}
 
@@ -117,63 +139,39 @@ func (app *App) Run(ctx context.Context) error {
 	})
 
 	app.bot.Handle("/run", func(c telebot.Context) error {
-		ID := c.Message().Payload
-		task, ok := app.tasksByID[ID]
+		name := c.Message().Payload
+		job, ok := app.jobByName[name]
 		if !ok {
-			return c.Reply("task with such ID not found")
+			return c.Reply("job with such name not found")
 		}
 
-		err := app.runTask(ctx, task, false)
+		err := app.runJob(ctx, job, false)
 		if err != nil {
-			return c.Reply(fmt.Sprintf("Task failed: %v", err))
+			return c.Reply(fmt.Sprintf("Job failed: %v", err))
 		}
 
-		return c.Reply("Task completed successfully")
+		return c.Reply("Job completed successfully")
 	})
 
 	app.bot.Handle("/help", func(c telebot.Context) error {
 		return c.Reply(
-			"/tasks - list all tasks\n" +
-				"/run <task_id> - run specific task\n" +
-				"/queue - show current task queue",
+			"/run <job> - run specific job\n" +
+				"/jobs - list all jobs\n" +
+				"/queue - show current job queue",
 		)
 	})
 
 	go app.bot.Start()
-
-	for {
-		nextTask := app.taskQueue.Next()
-		if nextTask == nil {
-			app.logger.Info("No more tasks")
-			break
-		}
-
-		duration := time.Until(nextTask.At.Add(time.Millisecond))
-		app.logger.Info(
-			"waiting for next task",
-			zap.String("id", nextTask.Task.ID),
-			zap.Time("until", nextTask.At),
-		)
-
-		// Wait untill task is active
-		select {
-		case <-time.After(duration):
-			// do nothing
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-
-		// Perform it asynchronously
-		go app.runTask(ctx, nextTask.Task, true)
-		// Get it back into the queue
-		app.taskQueue.PushTask(app.taskQueue.PopNextTask())
-	}
-
+	app.scheduler.Start()
 	return nil
 }
 
 func (app *App) Shutdown(ctx context.Context) {
 	app.bot.Stop()
+	err := app.scheduler.Shutdown()
+	if err != nil {
+		app.logger.Error("scheduler.Shutdown", zap.Error(err))
+	}
 	app.finished <- struct{}{}
 }
 
@@ -181,58 +179,57 @@ func (app *App) WaitShutdown() {
 	<-app.finished
 }
 
-func (app *App) aquireTicket(ctx context.Context) error {
-	select {
-	case app.taskTickets <- struct{}{}:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+func (app *App) Definition(job *Job) gocron.JobDefinition {
+	if job.Schedule == "manual" {
+		return gocron.OneTimeJob(
+			gocron.OneTimeJobStartDateTime(
+				// basically never
+				time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC),
+			),
+		)
 	}
+
+	return gocron.CronJob(job.Schedule, false)
 }
 
-func (app *App) releaseTicket() {
-	<-app.taskTickets
+func (app *App) Task(job *Job) gocron.Task {
+	return gocron.NewTask(func() error {
+		return app.runJob(context.Background(), job, true)
+	})
 }
 
-func (app *App) timeoutFor(task *Task) time.Duration {
-	if task.TimeoutSeconds > 0 {
-		return time.Duration(task.TimeoutSeconds) * time.Second
+func (app *App) timeoutFor(job *Job) time.Duration {
+	if job.TimeoutSeconds > 0 {
+		return time.Duration(job.TimeoutSeconds) * time.Second
 	}
 
 	return app.defaultTimeout
 }
 
-func (app *App) retryFor(task *Task) Retry {
-	if task.Retry != nil {
-		return *task.Retry
+func (app *App) retryFor(job *Job) Retry {
+	if job.Retry != nil {
+		return *job.Retry
 	}
 
 	return app.defaultRetry
 }
 
-func (app *App) runTask(ctx context.Context, task *Task, alert bool) error {
-	app.logger.Info("starting task", zap.String("id", task.ID))
-	err := app.aquireTicket(ctx)
-	if err != nil {
-		app.logger.Error("task failed to get a ticket", zap.String("id", task.ID), zap.Error(err))
-		return fmt.Errorf("app.aquireTicket: %w", err)
-	}
-	defer app.releaseTicket()
-
-	retry := app.retryFor(task)
+func (app *App) runJob(ctx context.Context, job *Job, alert bool) error {
+	retry := app.retryFor(job)
 	app.logger.Info(
-		"running task",
-		zap.String("id", task.ID),
+		"running job",
+		zap.String("name", job.Name),
 		zap.Int64("retry_count", retry.Count),
 		zap.Int64("retry_delay", retry.DelaySeconds),
 	)
-	err = app.withRetry(ctx, task, retry, func(ctx context.Context) error {
+
+	err := app.withRetry(ctx, job, retry, func(ctx context.Context) error {
 		var body io.Reader
-		if len(task.Body) > 0 {
-			body = strings.NewReader(task.Body)
+		if len(job.Body) > 0 {
+			body = strings.NewReader(job.Body)
 		}
 
-		req, err := http.NewRequestWithContext(ctx, task.Method, task.URL, body)
+		req, err := http.NewRequestWithContext(ctx, job.Method, job.URL, body)
 		if err != nil {
 			return fmt.Errorf("http.NewRequest: %w", err)
 		}
@@ -255,20 +252,20 @@ func (app *App) runTask(ctx context.Context, task *Task, alert bool) error {
 	})
 
 	if err != nil {
-		app.logger.Error("task failed", zap.String("id", task.ID), zap.Error(err))
+		app.logger.Error("job failed", zap.String("name", job.Name), zap.Error(err))
 
 		if alert {
-			err = errors.Join(err, app.sendAlert(ctx, task, err))
+			err = errors.Join(err, app.sendAlert(ctx, job, err))
 		}
 	} else {
-		app.logger.Info("task completed", zap.String("id", task.ID))
+		app.logger.Info("job completed", zap.String("name", job.Name))
 	}
 
 	return err
 }
 
-func (app *App) withRetry(ctx context.Context, task *Task, retry Retry, f func(ctx context.Context) error) error {
-	timeout := app.timeoutFor(task)
+func (app *App) withRetry(ctx context.Context, job *Job, retry Retry, f func(ctx context.Context) error) error {
+	timeout := app.timeoutFor(job)
 	tryOnce := func() error {
 		ctx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
@@ -280,8 +277,8 @@ func (app *App) withRetry(ctx context.Context, task *Task, retry Retry, f func(c
 		retry.Count--
 		duration := time.Duration(retry.DelaySeconds) * time.Second
 		app.logger.Warn(
-			"task will retry",
-			zap.String("id", task.ID),
+			"job will retry",
+			zap.String("job", job.Name),
 			zap.Error(err),
 			zap.Duration("in", duration),
 			zap.Int64("tries_remaining", retry.Count),
@@ -299,9 +296,9 @@ func (app *App) withRetry(ctx context.Context, task *Task, retry Retry, f func(c
 	return err
 }
 
-func (app *App) sendAlert(_ context.Context, task *Task, taskErr error) error {
+func (app *App) sendAlert(_ context.Context, job *Job, jobErr error) error {
 	// TOD: cancellation?
-	message := fmt.Sprintf("Task %v failed: %v", task.ID, taskErr)
+	message := fmt.Sprintf("Job %v failed: %v", job.Name, jobErr)
 	_, err := app.bot.Send(app.chat, message)
 	return err
 }

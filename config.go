@@ -8,30 +8,21 @@ import (
 	"github.com/goccy/go-yaml"
 )
 
-type TaskPeriod = string
-
-const (
-	TaskPeriodManual = "manual"
-	TaskPeriodMinute = "every minute"
-	TaskPeriodHourly = "every hour"
-	TaskPeriodDaily  = "every day"
-)
-
 type Config struct {
 	// Telegram config
 	Token  string `yaml:"token"`
 	ChatID int64  `yaml:"chat_id"`
 
-	// Tasks config
-	Tasks              []Task `yaml:"tasks"`
-	DefaultRetry       Retry  `yaml:"default_retry"`
-	DefaultTaskTimeout int64  `yaml:"default_timeout_sec"`
-	MaxActiveTasks     int64  `yaml:"max_active_tasks"`
+	// Jobs config
+	Jobs              []Job `yaml:"jobs"`
+	DefaultRetry      Retry `yaml:"default_retry"`
+	DefaultJobTimeout int64 `yaml:"default_timeout_sec"`
+	MaxActiveJobs     int64 `yaml:"max_active_jobs"`
 }
 
-type Task struct {
-	ID             string `yaml:"id"`
-	When           string `yaml:"when"`
+type Job struct {
+	Name           string `yaml:"name"`
+	Schedule       string `yaml:"schedule"`
 	Method         string `yaml:"method"` // POST by default
 	URL            string `yaml:"url"`
 	Body           string `yaml:"body"` // Empty by default
@@ -58,17 +49,17 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("yaml.Unmarshal: %w", err)
 	}
 
-	if config.MaxActiveTasks == 0 {
-		return nil, fmt.Errorf("set max_active_tasks")
+	if config.MaxActiveJobs == 0 {
+		return nil, fmt.Errorf("set max_active_jobs")
 	}
 
-	if config.DefaultTaskTimeout == 0 {
-		return nil, fmt.Errorf("set default_task_timeout")
+	if config.DefaultJobTimeout == 0 {
+		return nil, fmt.Errorf("set default_job_timeout")
 	}
 
-	for i, task := range config.Tasks {
-		if len(task.Method) == 0 {
-			config.Tasks[i].Method = http.MethodPost
+	for i, job := range config.Jobs {
+		if len(job.Method) == 0 {
+			config.Jobs[i].Method = http.MethodPost
 		}
 	}
 
