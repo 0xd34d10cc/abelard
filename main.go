@@ -18,7 +18,7 @@ func main() {
 	}
 	defer logger.Sync()
 
-	config, err := LoadConfig("./config.yaml")
+	config, err := LoadConfig("config.yaml")
 	if err != nil {
 		logger.Fatal("Failed to read config", zap.Error(err))
 	}

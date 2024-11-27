@@ -92,6 +92,24 @@ func NewApp(config *Config, logger *zap.Logger) (*App, error) {
 }
 
 func (app *App) Run(ctx context.Context) error {
+	err := app.bot.SetCommands([]telebot.Command{
+		{
+			Text:        "queue",
+			Description: "show job queue",
+		},
+		{
+			Text:        "jobs",
+			Description: "list jobs",
+		},
+		{
+			Text:        "run",
+			Description: "run specific job",
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("bot.SetCommands: %w", err)
+	}
+
 	app.bot.Use(func(next telebot.HandlerFunc) telebot.HandlerFunc {
 		return func(c telebot.Context) error {
 			chat := c.Chat()
@@ -151,14 +169,6 @@ func (app *App) Run(ctx context.Context) error {
 		}
 
 		return c.Reply("Job completed successfully")
-	})
-
-	app.bot.Handle("/help", func(c telebot.Context) error {
-		return c.Reply(
-			"/run <job> - run specific job\n" +
-				"/jobs - list all jobs\n" +
-				"/queue - show current job queue",
-		)
 	})
 
 	go app.bot.Start()
