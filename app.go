@@ -258,7 +258,7 @@ func (app *App) runJob(ctx context.Context, job *Job, alert bool) error {
 		}
 
 		text, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("request failed wtih %v: %v", resp.StatusCode, text)
+		return fmt.Errorf("request failed wtih %v: %v", resp.StatusCode, string(text))
 	})
 
 	if err != nil {
